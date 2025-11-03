@@ -1,145 +1,233 @@
 
 # ui.R
+library(shiny)
+library(shinydashboard)
 source("global.R")
 
 dashboardPage(
-  dashboardHeader(title = "Global Housing Analysis"),
-  
+  dashboardHeader(title = "Global Major Cities Housing Analysis"),
   dashboardSidebar(
-    collapsed = TRUE,
     sidebarMenu(
-      id = "mainmenu",
-      menuItem("Overview", tabName = "overview", icon = icon("home")),
-      menuItem("Descriptive Market Insights", tabName = "insights", icon = icon("chart-line"))
+      id = "tabs",
+      menuItem("Overview",                tabName = "overview",  icon = icon("home")),
+      menuItem("Descriptive Insights",    tabName = "insights",  icon = icon("chart-line")),
+      menuItem("Financial Analysis",      tabName = "financial", icon = icon("dollar-sign"))
     )
   ),
-  
   dashboardBody(
+    
+    # ---- Small style tweaks (map reset button over the map) ----
+    tags$style(HTML("
+      .leaflet-control.custom-reset {
+        background: white; padding: 6px 10px; border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      }
+      .map-reset-container {
+        position: absolute; right: 18px; top: 18px; z-index: 500;
+      }
+    ")),
+    
     tabItems(
-      # ----------------------------------------------------------------
-      # OVERVIEW
-      # ----------------------------------------------------------------
+      
+      # ==================================================================
+      # OVERVIEW TAB
+      # ==================================================================
       tabItem(
         tabName = "overview",
-        
-        fluidRow(
-          box(
-            title = "Header Image", width = 12, solidHeader = TRUE, status = "primary",
-            uiOutput("overview_image_placeholder"), height = 280
-          )
-        ),
-        
-        fluidRow(
-          box(
-            width = 12, status = "info", solidHeader = TRUE, title = "Scope",
-            tags$strong("Global Major Cities Housing Purchase Analysis"),
-            p("This app focuses on housing purchase data across major global cities.")
-          )
-        ),
-        
         fluidRow(
           valueBoxOutput("vb_min_year", width = 3),
           valueBoxOutput("vb_countries", width = 3),
           valueBoxOutput("vb_cities", width = 3),
           valueBoxOutput("vb_rows", width = 3)
         ),
-        
         fluidRow(
           box(
-            title = "What this site does", width = 12, status = "warning", solidHeader = TRUE,
-            uiOutput("overview_intro")
+            title = "Scope & Purpose", width = 12, status = "primary", solidHeader = TRUE,
+            tags$strong("Global Major Cities Housing Purchase Analysis"),
+            tags$p("This app focuses on housing purchase data across major global cities."),
+            uiOutput("overview_intro"),
+            br(),
+            uiOutput("overview_image_placeholder")
           )
         )
       ),
       
-      # ----------------------------------------------------------------
-      # DESCRIPTIVE MARKET INSIGHTS
-      # ----------------------------------------------------------------
+      # ==================================================================
+      # DESCRIPTIVE MARKET INSIGHTS (with Interactive Map)
+      # ==================================================================
       tabItem(
         tabName = "insights",
         
-        # Currency selector row
+        # Controls row (currency + filters)
         fluidRow(
           box(
-            title = "Currency", width = 12, status = "primary", solidHeader = TRUE,
+            title = "Currency & Filters", width = 12, status = "primary", solidHeader = TRUE,
             fluidRow(
               column(
-                width = 6,
+                width = 4,
                 selectInput(
-                  inputId  = "currency_basis",
-                  label    = "Currency basis",
-                  choices  = c("Local currency", "USD (FX, nominal)"),
-                  selected = "Local currency"
+                  "currency_basis", "Price display",
+                  choices = c("Local currency (nominal)", "USD (FX, nominal)"),
+                  selected = "Local currency (nominal)"
+                ),
+                uiOutput("fx_note")
+              ),
+              column(
+                width = 4,
+                selectInput(
+                  "flt_country", "Country",
+                  choices = c("All", sort(unique(house$country))),
+                  selected = "All", multiple = FALSE, selectize = TRUE
                 )
               ),
-              column(width = 6, uiOutput("fx_note"))
+              column(
+                width = 4,
+                selectInput(
+                  "flt_property", "Property type",
+                  choices = c("All", sort(unique(house$property_type))),
+                  selected = "All", multiple = FALSE, selectize = TRUE
+                )
+              )
             )
           )
         ),
         
-        # Shared filters (Country + Property type)
+        # Size vs Price & bin summary
         fluidRow(
           box(
-            title = "Filters (apply to charts below)", width = 12, status = "info", solidHeader = TRUE,
+            title = "Property Size vs. Price (bin & compare)", width = 8,
+            status = "info", solidHeader = TRUE,
+            plotlyOutput("plot_size_price", height = 420)
+          ),
+          box(
+            title = "Selected Bin Summary", width = 4,
+            status = "info", solidHeader = TRUE,
+            uiOutput("bin_summary")
+          )
+        ),
+        
+        # Amenities pies and Furnishing pies by selected quartile
+        fluidRow(
+          box(
+            title = "Amenities in Selected Price Quartile", width = 6,
+            status = "warning", solidHeader = TRUE,
+            selectInput(
+              "amen_quartile", "Price quartile",
+              choices = c("Q1", "Q2", "Q3", "Q4"), selected = "Q4"
+            ),
+            plotlyOutput("pie_amenities", height = 360)
+          ),
+          box(
+            title = "Furnishing Status in Selected Price Quartile", width = 6,
+            status = "warning", solidHeader = TRUE,
+            plotlyOutput("pie_furnish", height = 360)
+          )
+        ),
+        
+        # Age of house impact on value + reset
+        fluidRow(
+          box(
+            title = "Age of House Impact on Value", width = 12,
+            status = "success", solidHeader = TRUE,
+            div(
+              style = "display:flex; gap:10px; align-items:center; margin-bottom:8px;",
+              actionButton("btn_reset_age", "Reset view", icon = icon("undo"))
+            ),
+            plotlyOutput("plot_age_impact", height = 420)
+          )
+        ),
+        
+        # Interactive Map with reset overlay
+        fluidRow(
+          box(
+            title = "Interactive Map — Average Prices by Country/City", width = 12,
+            status = "primary", solidHeader = TRUE,
+            div(class = "map-reset-container",
+                tags$div(class = "leaflet-control custom-reset",
+                         actionButton("btn_reset_map", "Back to global", icon = icon("globe"))
+                )
+            ),
+            leafletOutput("map_prices", height = 520)
+          )
+        )
+      ),
+      
+      # ==================================================================
+      # FINANCIAL ANALYSIS
+      # ==================================================================
+      tabItem(
+        tabName = "financial",
+        
+        # Controls
+        fluidRow(
+          box(
+            title = "Filters", width = 12, status = "primary", solidHeader = TRUE,
             fluidRow(
               column(
-                width = 6,
-                selectInput("flt_country", "Country", choices = c("All", sort(unique(house$country))), selected = "All")
+                width = 4,
+                selectInput(
+                  "fin_country", "Country",
+                  choices = c("All", sort(unique(house$country))),
+                  selected = "All", multiple = FALSE, selectize = TRUE
+                )
               ),
               column(
-                width = 6,
-                selectInput("flt_property", "Property type", choices = c("All", sort(unique(house$property_type))), selected = "All")
+                width = 4,
+                selectInput(
+                  "fin_property", "Property type",
+                  choices = c("All", sort(unique(house$property_type))),
+                  selected = "All", multiple = FALSE, selectize = TRUE
+                )
+              ),
+              column(
+                width = 4,
+                selectInput(
+                  "fin_xvar", "X-axis for scatter",
+                  choices = c("salary", "loan", "emi"),
+                  selected = "salary"
+                )
               )
+            ),
+            sliderInput(
+              "fin_salary_bins", "Salary bucket count (for purchased-only bar chart)",
+              min = 4, max = 20, value = 8, step = 1
             )
           )
         ),
         
-        # a) Size vs Price (Plotly) + selected bin summary
-        fluidRow(
-          box(title = "Property Size vs Price (binned)", width = 8, status = "success", solidHeader = TRUE,
-              plotlyOutput("plot_size_price", height = "360px")),
-          box(title = "Selected Bin Summary", width = 4, status = "success", solidHeader = TRUE,
-              uiOutput("bin_summary"))
-        ),
-        
-        # b) Amenities pie + Furnishing pie (Plotly)
-        fluidRow(
-          box(title = "Amenities in Selected Price Quartile", width = 6, status = "warning", solidHeader = TRUE,
-              selectInput("amen_quartile", "Price quartile (computed within current filters)",
-                          choices = c("Q1 (lowest)" = "Q1", "Q2" = "Q2", "Q3" = "Q3", "Q4 (highest)" = "Q4"),
-                          selected = "Q4"),
-              plotlyOutput("pie_amenities", height = "320px")),
-          box(title = "Furnishing Status in Selected Price Quartile", width = 6, status = "warning", solidHeader = TRUE,
-              plotlyOutput("pie_furnish", height = "320px"))
-        ),
-        
-        # c) Age impact (Plotly with box-select to ZOOM + reset)
+        # Charts
         fluidRow(
           box(
-            title = "Age of House Impact on Value (drag to zoom a year range, click Autoscale to reset axes)",
-            width = 12, status = "success", solidHeader = TRUE,
-            # ↓ Add the reset button just above the plot
-            actionButton("btn_reset_age", "Reset view",
-                         class = "btn-primary", style = "float:right;"),
-            plotlyOutput("plot_age_impact", height = "360px")
+            title = "Salary / Loan / EMI vs Price (colored by decision)", width = 12,
+            status = "info", solidHeader = TRUE,
+            plotlyOutput("fin_scatter", height = 420)
           )
         ),
-        
-        # d) Interactive Map with overlay reset button + size legend
         fluidRow(
-          box(title = "Interactive Map of Average Prices", width = 12, status = "primary", solidHeader = TRUE,
-              p("Hover on a country to see the average price. Click a country to drill into its cities. Hover over a city for details."),
-              div(
-                style = "position: relative;",
-                leafletOutput("map_prices", height = 520),
-                tags$div(
-                  style = "position: absolute; top: 15px; right: 15px; z-index: 1000;",
-                  actionButton("btn_reset_map", "Back to Global View", class = "btn-primary")
-                )
-              )
+          box(
+            title = "Which income groups buy more expensive properties? (purchases only)",
+            width = 12, status = "warning", solidHeader = TRUE,
+            plotlyOutput("fin_salary_buckets", height = 380)
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Affordability Index (Price / Salary) over Year Built",
+            width = 12, status = "success", solidHeader = TRUE,
+            plotlyOutput("fin_affordability", height = 380)
+          )
+        ),
+        fluidRow(
+          box(
+            title = "EMI-to-Income Ratio vs Purchase Rate (binned)", width = 12,
+            status = "primary", solidHeader = TRUE,
+            plotlyOutput("fin_emi_heat", height = 260),
+            br(),
+            tableOutput("fin_emi_table")
           )
         )
       )
+      
     )
   )
 )

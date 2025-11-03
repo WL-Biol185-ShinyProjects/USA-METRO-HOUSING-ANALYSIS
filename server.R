@@ -140,7 +140,7 @@ shinyServer(function(input, output, session) {
   }
   
   # ====================================================================
-  # SHARED FILTERS (Country + Property type)
+  # SHARED FILTERS (Country + Property type) for Insights tab
   # ====================================================================
   df_filtered <- reactive({
     df <- df_price()
@@ -181,7 +181,8 @@ shinyServer(function(input, output, session) {
           showarrow = FALSE, xref = "paper", yref = "paper"
         )
       )
-      return(plotly::event_register(p, 'plotly_click'))
+      p <- plotly::event_register(p, 'plotly_click')
+      return(p)
     }
     
     binned <- df %>%
@@ -215,7 +216,8 @@ shinyServer(function(input, output, session) {
         hovermode = "closest"
       )
     
-    plotly::event_register(p, 'plotly_click')
+    p <- plotly::event_register(p, 'plotly_click')
+    p
   })
   
   observeEvent(plotly::event_data("plotly_click", source = "sp"), {
@@ -272,6 +274,7 @@ shinyServer(function(input, output, session) {
     )
   })
   
+  # Updated to include mutually exclusive slices incl. "None"
   output$pie_amenities <- renderPlotly({
     df <- df_filtered(); req(nrow(df) > 0)
     
@@ -279,13 +282,19 @@ shinyServer(function(input, output, session) {
     
     dfx <- df %>%
       dplyr::filter(idx) %>%
-      dplyr::summarise(
-        Garage  = mean(garage == 1, na.rm = TRUE),
-        Garden  = mean(garden == 1, na.rm = TRUE)
+      dplyr::mutate(
+        garage_present = garage %in% 1,
+        garden_present = garden %in% 1,
+        AmenityGroup = dplyr::case_when(
+          garage_present & garden_present ~ "Both",
+          garage_present & !garden_present ~ "Garage only",
+          !garage_present & garden_present ~ "Garden only",
+          TRUE ~ "None"
+        )
       ) %>%
-      tidyr::pivot_longer(dplyr::everything(), names_to = "Amenity", values_to = "Share") %>%
-      dplyr::mutate(Share = ifelse(is.finite(Share), Share, NA_real_)) %>%
-      dplyr::filter(!is.na(Share))
+      dplyr::count(AmenityGroup, name = "n") %>%
+      dplyr::mutate(Share = n / sum(n)) %>%
+      dplyr::arrange(factor(AmenityGroup, levels = c("None", "Garage only", "Garden only", "Both")))
     
     if (nrow(dfx) == 0) {
       return(plotly::plot_ly() %>% layout(
@@ -296,7 +305,7 @@ shinyServer(function(input, output, session) {
     
     plotly::plot_ly(
       data = dfx,
-      labels = ~Amenity, values = ~Share,
+      labels = ~AmenityGroup, values = ~Share,
       type = "pie",
       textinfo = "label+percent",
       hovertemplate = "%{label}: %{percent:.1%}<extra></extra>"
@@ -366,7 +375,8 @@ shinyServer(function(input, output, session) {
                   make_yaxis_compact(agg$avg_price, digits = 3))
       )
     
-    plotly::event_register(p, 'plotly_selected')
+    p <- plotly::event_register(p, 'plotly_selected')
+    p
   })
   
   observeEvent(plotly::event_data("plotly_selected", source = "age"), {
@@ -461,4 +471,271 @@ shinyServer(function(input, output, session) {
       ) %>%
       setView(lng = 10, lat = 20, zoom = 2)
   })
+  
+  # ====================================================================
+  # FINANCIAL ANALYSIS TAB
+  # ====================================================================
+  
+  # ---- Column resolver (handles alternative column names safely) ----
+  resolve_col <- function(prefs, in_names = names(house)) {
+    hit <- prefs[prefs %in% in_names]
+    if (length(hit)) hit[[1]] else NA_character_
+  }
+  
+  col_salary   <- resolve_col(c("customer_salary", "salary", "income"))
+  col_loan     <- resolve_col(c("loan_amount", "loan", "loan_amt"))
+  col_emi      <- resolve_col(c("emi_to_income", "emi_to_income_ratio", "emi_ratio", "emi"))
+  col_decision <- resolve_col(c("decision", "purchase_decision", "purchased"))
+  
+  # --- Ensure EMI mapping is correct (force to the known CSV column if present)
+  if (is.na(col_emi) || is.null(col_emi) || !(col_emi %in% names(house))) {
+    if ("emi_to_income_ratio" %in% names(house)) {
+      col_emi <- "emi_to_income_ratio"
+    }
+  }
+  
+  # Helper: robust decision -> 0/1
+  decision_to_binary <- function(x) {
+    d <- tolower(as.character(x))
+    dplyr::case_when(
+      d %in% c("1","true","t","yes","y","purchased","buy","bought") ~ 1,
+      d %in% c("0","false","f","no","n","not purchased","reject","decline") ~ 0,
+      TRUE ~ suppressWarnings(as.numeric(d))
+    )
+  }
+  
+  # Build a "financial base" with standardized columns if they exist
+  df_financial_base <- reactive({
+    df <- df_price()
+    df %>%
+      dplyr::mutate(
+        salary   = if (!is.na(col_salary))   suppressWarnings(as.numeric(.data[[col_salary]]))   else NA_real_,
+        loan     = if (!is.na(col_loan))     suppressWarnings(as.numeric(.data[[col_loan]]))     else NA_real_,
+        emi      = if (!is.na(col_emi))      suppressWarnings(as.numeric(.data[[col_emi]]))      else NA_real_,
+        decision = if (!is.na(col_decision)) decision_to_binary(.data[[col_decision]])           else NA_real_
+      )
+  })
+  
+  # Filters for the Financial tab (independent from Insights)
+  df_financial <- reactive({
+    df <- df_financial_base()
+    if (!is.null(input$fin_country)  && input$fin_country  != "All") df <- df %>% dplyr::filter(country == input$fin_country)
+    if (!is.null(input$fin_property) && input$fin_property != "All") df <- df %>% dplyr::filter(property_type == input$fin_property)
+    df
+  })
+  
+  # Axis label helper for y = price_display
+  yaxis_money <- function(yvals, digits = 1) {
+    c(list(title = ""), make_yaxis_compact(yvals, digits = digits))
+  }
+  
+  # 1) Relationship scatter (salary/loan/EMI vs price, colored by decision)
+  output$fin_scatter <- renderPlotly({
+    df <- df_financial()
+    req(nrow(df) > 0, !all(is.na(df$price_display)))
+    
+    xkey <- switch(input$fin_xvar,
+                   salary = "salary",
+                   loan   = "loan",
+                   emi    = "emi",
+                   "salary")
+    req(xkey %in% names(df))
+    
+    dfx <- df %>%
+      dplyr::filter(is.finite(.data[[xkey]]), is.finite(price_display)) %>%
+      dplyr::mutate(
+        decision_f = dplyr::case_when(
+          !is.na(decision) & decision %in% c(1) ~ "Purchased",
+          !is.na(decision) & decision %in% c(0) ~ "Not purchased",
+          TRUE ~ "Unknown"
+        )
+      )
+    
+    if (nrow(dfx) == 0) return(plotly::plot_ly())
+    
+    xlab <- switch(xkey,
+                   salary = "Customer salary",
+                   loan   = "Loan amount",
+                   emi    = "EMI-to-income ratio",
+                   xkey)
+    
+    plotly::plot_ly(
+      data = dfx,
+      x = ~.data[[xkey]], y = ~price_display, color = ~decision_f,
+      type = "scatter", mode = "markers",
+      text = ~paste0(
+        xlab, ": ",
+        if (xkey == "emi") round(.data[[xkey]], 3) else scales::number(.data[[xkey]], accuracy = 1),
+        "<br>Price: ", fmt_compact_money(price_display),
+        "<br>Decision: ", decision_f
+      ),
+      hoverinfo = "text",
+      alpha = 0.6
+    ) %>%
+      layout(
+        xaxis = list(title = xlab),
+        yaxis = yaxis_money(dfx$price_display, digits = 1),
+        legend = list(orientation = "h", y = -0.2)
+      )
+  })
+  
+  # 2) Salary buckets → avg price (purchases only)
+  output$fin_salary_buckets <- renderPlotly({
+    df <- df_financial()
+    req(nrow(df) > 0, !all(is.na(df$salary)), !all(is.na(df$price_display)))
+    
+    dfx <- df %>%
+      dplyr::filter(decision %in% c(1), is.finite(salary), is.finite(price_display))
+    
+    if (nrow(dfx) == 0) {
+      return(plotly::plot_ly() %>% layout(
+        annotations = list(x = 0.5, y = 0.5, text = "No purchased records under current filters",
+                           showarrow = FALSE, xref = "paper", yref = "paper")
+      ))
+    }
+    
+    k <- ifelse(is.null(input$fin_salary_bins), 8, input$fin_salary_bins)
+    probs <- seq(0, 1, length.out = k + 1)
+    brks  <- unique(stats::quantile(dfx$salary, probs = probs, na.rm = TRUE))
+    if (length(brks) < 2) {
+      return(plotly::plot_ly() %>% layout(
+        annotations = list(x = 0.5, y = 0.5, text = "Not enough variation in salary to bucket",
+                           showarrow = FALSE, xref = "paper", yref = "paper")
+      ))
+    }
+    
+    agg <- dfx %>%
+      dplyr::mutate(sal_bin = cut(salary, breaks = brks, include.lowest = TRUE, dig.lab = 8)) %>%
+      dplyr::group_by(sal_bin) %>%
+      dplyr::summarise(
+        avg_price = mean(price_display, na.rm = TRUE),
+        n = dplyr::n(), .groups = "drop"
+      ) %>%
+      dplyr::filter(is.finite(avg_price))
+    
+    plotly::plot_ly(
+      data = agg,
+      x = ~sal_bin, y = ~avg_price, type = "bar",
+      text = ~paste0("Avg price: ", fmt_compact_money(avg_price), "<br>Obs: ", n),
+      hoverinfo = "text"
+    ) %>%
+      layout(
+        xaxis = list(title = "Salary buckets (quantiles)"),
+        yaxis = yaxis_money(agg$avg_price, digits = 1),
+        bargap = 0.15
+      )
+  })
+  
+  # 3) Affordability index = price / salary (over constructed year)
+  output$fin_affordability <- renderPlotly({
+    df <- df_financial()
+    req(nrow(df) > 0, "constructed_year" %in% names(df))
+    
+    dfx <- df %>%
+      dplyr::filter(is.finite(price_display), is.finite(salary), is.finite(constructed_year)) %>%
+      dplyr::mutate(afford_idx = price_display / salary) %>%
+      dplyr::group_by(constructed_year) %>%
+      dplyr::summarise(afford_idx = mean(afford_idx, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::arrange(constructed_year)
+    
+    if (nrow(dfx) == 0) return(plotly::plot_ly())
+    
+    plotly::plot_ly(
+      data = dfx,
+      x = ~constructed_year, y = ~afford_idx,
+      type = "scatter", mode = "lines+markers",
+      text = ~paste0("Year: ", constructed_year, "<br>Affordability index: ", round(afford_idx, 3)),
+      hoverinfo = "text"
+    ) %>%
+      layout(
+        xaxis = list(title = "Constructed year"),
+        yaxis = list(title = "Price / Salary", tickformat = ".3f")
+      )
+  })
+  
+  # 4) EMI-to-income ratio bins vs purchase rate (heatmap with fixed bins) + summary table
+  output$fin_emi_heat <- renderPlotly({
+    df <- df_financial()
+    req(nrow(df) > 0, "emi" %in% names(df), "decision" %in% names(df))
+    
+    dfx <- df %>% dplyr::filter(is.finite(emi), !is.na(decision))
+    if (nrow(dfx) == 0) {
+      return(plotly::plot_ly() %>% layout(
+        annotations = list(x = 0.5, y = 0.5, text = "No rows with valid EMI & decision under current filters.",
+                           showarrow = FALSE, xref = "paper", yref = "paper")
+      ))
+    }
+    
+    breaks <- c(-Inf, 0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, Inf)
+    labels <- c("<0.00","0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
+                "0.40–0.50","0.50–0.60","0.60–0.80","0.80–1.00",">1.00")
+    
+    agg <- dfx %>%
+      dplyr::mutate(
+        emi_bin   = cut(emi, breaks = breaks, include.lowest = TRUE, right = TRUE, labels = labels),
+        purchased = decision == 1
+      ) %>%
+      dplyr::group_by(emi_bin) %>%
+      dplyr::summarise(
+        purchase_rate = mean(purchased, na.rm = TRUE),
+        n = dplyr::n(), .groups = "drop"
+      ) %>%
+      dplyr::mutate(emi_bin = factor(emi_bin, levels = labels)) %>%
+      tidyr::complete(emi_bin, fill = list(purchase_rate = NA_real_, n = 0)) %>%
+      dplyr::arrange(emi_bin)
+    
+    plotly::plot_ly(
+      x = agg$emi_bin, y = "Purchase rate", z = agg$purchase_rate,
+      type = "heatmap", colorscale = "Viridis",
+      zmin = 0, zmax = 1,
+      text = paste0(
+        "EMI bin: ", agg$emi_bin,
+        "<br>Purchase rate: ",
+        ifelse(is.na(agg$purchase_rate), "—", scales::percent(agg$purchase_rate, accuracy = 1)),
+        "<br>Obs: ", agg$n
+      ),
+      hoverinfo = "text"
+    ) %>%
+      layout(
+        xaxis = list(title = "EMI-to-income bin"),
+        yaxis = list(title = "", tickvals = "Purchase rate", ticktext = "Purchase rate")
+      )
+  })
+  
+  output$fin_emi_table <- renderTable({
+    df <- df_financial()
+    req(nrow(df) > 0, "emi" %in% names(df), "decision" %in% names(df))
+    
+    dfx <- df %>% dplyr::filter(is.finite(emi), !is.na(decision))
+    if (nrow(dfx) == 0) return(NULL)
+    
+    breaks <- c(-Inf, 0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, Inf)
+    labels <- c("<0.00","0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
+                "0.40–0.50","0.50–0.60","0.60–0.80","0.80–1.00",">1.00")
+    
+    agg <- dfx %>%
+      dplyr::mutate(
+        emi_bin   = cut(emi, breaks = breaks, include.lowest = TRUE, right = TRUE, labels = labels),
+        purchased = decision == 1
+      ) %>%
+      dplyr::group_by(emi_bin) %>%
+      dplyr::summarise(
+        Observations   = dplyr::n(),
+        Purchase_Rate  = mean(purchased, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        emi_bin = as.character(emi_bin),
+        Purchase_Rate = scales::percent(Purchase_Rate, accuracy = 1)
+      ) %>%
+      dplyr::arrange(factor(emi_bin, levels = labels))
+    
+    total_obs <- sum(agg$Observations, na.rm = TRUE)
+    agg <- dplyr::bind_rows(
+      agg,
+      tibble::tibble(emi_bin = "TOTAL (valid EMI & decision)", Observations = total_obs, Purchase_Rate = "")
+    )
+    
+    agg %>% dplyr::rename(`EMI bin` = emi_bin)
+  }, striped = TRUE, spacing = "s")
 })

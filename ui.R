@@ -188,17 +188,13 @@ dashboardPage(
                 )
               )
             ),
-            sliderInput(
-              "fin_salary_bins", "Salary bucket count (for purchased-only bar chart)",
-              min = 4, max = 20, value = 8, step = 1
-            )
           )
         ),
         
         # Charts
         fluidRow(
           box(
-            title = "Salary / Loan / EMI vs Price (colored by decision)", width = 12,
+            title = "Salary / Loan / EMI (Equated Monthly Installments) vs Price (colored by decision)", width = 12,
             status = "info", solidHeader = TRUE,
             plotlyOutput("fin_scatter", height = 420)
           )
@@ -207,6 +203,11 @@ dashboardPage(
           box(
             title = "Which income groups buy more expensive properties? (purchases only)",
             width = 12, status = "warning", solidHeader = TRUE,
+            # <-- moved here -->
+            sliderInput(
+              "fin_salary_bins", "Salary bucket count",
+              min = 4, max = 20, value = 8, step = 1
+            ),
             plotlyOutput("fin_salary_buckets", height = 380)
           )
         ),
@@ -221,9 +222,8 @@ dashboardPage(
           box(
             title = "EMI-to-Income Ratio vs Purchase Rate (binned)", width = 12,
             status = "primary", solidHeader = TRUE,
-            plotlyOutput("fin_emi_heat", height = 260),
+            plotlyOutput("fin_emi_rate_bins", height = 380),
             br(),
-            tableOutput("fin_emi_table")
           )
         )
       )

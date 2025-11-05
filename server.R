@@ -511,7 +511,11 @@ shinyServer(function(input, output, session) {
       dplyr::mutate(
         salary   = if (!is.na(col_salary))   suppressWarnings(as.numeric(.data[[col_salary]]))   else NA_real_,
         loan     = if (!is.na(col_loan))     suppressWarnings(as.numeric(.data[[col_loan]]))     else NA_real_,
-        emi      = if (!is.na(col_emi))      suppressWarnings(as.numeric(.data[[col_emi]]))      else NA_real_,
+        emi      = if (!is.na(col_emi)) {
+          v <- suppressWarnings(as.numeric(.data[[col_emi]]))
+          # Clamp impossible negatives to 0; keep NA for non-finite
+          dplyr::if_else(is.finite(v) & v < 0, 0, v, missing = NA_real_)
+        } else NA_real_,
         decision = if (!is.na(col_decision)) decision_to_binary(.data[[col_decision]])           else NA_real_
       )
   })
@@ -653,89 +657,75 @@ shinyServer(function(input, output, session) {
       )
   })
   
-  # 4) EMI-to-income ratio bins vs purchase rate (heatmap with fixed bins) + summary table
-  output$fin_emi_heat <- renderPlotly({
+  # 4) EMI-to-income ratio — Purchase rate (top) + Bin counts (bottom) with named legend
+  output$fin_emi_rate_bins <- renderPlotly({
     df <- df_financial()
     req(nrow(df) > 0, "emi" %in% names(df), "decision" %in% names(df))
     
-    dfx <- df %>% dplyr::filter(is.finite(emi), !is.na(decision))
-    if (nrow(dfx) == 0) {
-      return(plotly::plot_ly() %>% layout(
-        annotations = list(x = 0.5, y = 0.5, text = "No rows with valid EMI & decision under current filters.",
-                           showarrow = FALSE, xref = "paper", yref = "paper")
-      ))
-    }
+    dfx <- df %>% dplyr::filter(is.finite(emi), emi >= 0, !is.na(decision))
+    if (nrow(dfx) == 0) return(plotly::plot_ly())
     
-    breaks <- c(-Inf, 0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, Inf)
-    labels <- c("<0.00","0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
+    breaks <- c(0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, Inf)
+    labels <- c("0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
                 "0.40–0.50","0.50–0.60","0.60–0.80","0.80–1.00",">1.00")
     
     agg <- dfx %>%
       dplyr::mutate(
-        emi_bin   = cut(emi, breaks = breaks, include.lowest = TRUE, right = TRUE, labels = labels),
+        emi_bin = cut(
+          emi,
+          breaks = breaks,
+          include.lowest = TRUE,   # include 0 in the first interval
+          right = FALSE,           # [a, b) so 0 -> "0.00–0.10"
+          labels = labels
+        ),
         purchased = decision == 1
       ) %>%
       dplyr::group_by(emi_bin) %>%
       dplyr::summarise(
         purchase_rate = mean(purchased, na.rm = TRUE),
-        n = dplyr::n(), .groups = "drop"
+        n             = dplyr::n(), .groups = "drop"
       ) %>%
       dplyr::mutate(emi_bin = factor(emi_bin, levels = labels)) %>%
       tidyr::complete(emi_bin, fill = list(purchase_rate = NA_real_, n = 0)) %>%
       dplyr::arrange(emi_bin)
     
-    plotly::plot_ly(
-      x = agg$emi_bin, y = "Purchase rate", z = agg$purchase_rate,
-      type = "heatmap", colorscale = "Viridis",
-      zmin = 0, zmax = 1,
-      text = paste0(
-        "EMI bin: ", agg$emi_bin,
+    # Top: purchase rate line
+    p_rate <- plotly::plot_ly(
+      data = agg,
+      x = ~emi_bin, y = ~purchase_rate,
+      type = "scatter", mode = "lines+markers",
+      name = "Purchase Rate", showlegend = TRUE,
+      text = ~paste0(
+        "EMI bin: ", emi_bin,
         "<br>Purchase rate: ",
-        ifelse(is.na(agg$purchase_rate), "—", scales::percent(agg$purchase_rate, accuracy = 1)),
-        "<br>Obs: ", agg$n
+        ifelse(is.na(purchase_rate), "—", scales::percent(purchase_rate, accuracy = 1)),
+        "<br>Obs: ", n
       ),
       hoverinfo = "text"
     ) %>%
       layout(
+        yaxis = list(title = "Purchase rate", tickformat = ".0%"),
+        margin = list(t = 20)
+      )
+    
+    # Bottom: observation counts
+    p_count <- plotly::plot_ly(
+      data = agg,
+      x = ~emi_bin, y = ~n,
+      type = "bar",
+      name = "Number of Decisions", showlegend = TRUE,
+      text = ~paste0("EMI bin: ", emi_bin, "<br>Obs: ", n),
+      hoverinfo = "text"
+    ) %>%
+      layout(
+        yaxis = list(title = "Observations"),
+        margin = list(t = 10)
+      )
+    
+    plotly::subplot(p_rate, p_count, nrows = 2, shareX = TRUE, heights = c(0.6, 0.4)) %>%
+      layout(
         xaxis = list(title = "EMI-to-income bin"),
-        yaxis = list(title = "", tickvals = "Purchase rate", ticktext = "Purchase rate")
+        legend = list(orientation = "h", y = -0.15)
       )
   })
-  
-  output$fin_emi_table <- renderTable({
-    df <- df_financial()
-    req(nrow(df) > 0, "emi" %in% names(df), "decision" %in% names(df))
-    
-    dfx <- df %>% dplyr::filter(is.finite(emi), !is.na(decision))
-    if (nrow(dfx) == 0) return(NULL)
-    
-    breaks <- c(-Inf, 0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, Inf)
-    labels <- c("<0.00","0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
-                "0.40–0.50","0.50–0.60","0.60–0.80","0.80–1.00",">1.00")
-    
-    agg <- dfx %>%
-      dplyr::mutate(
-        emi_bin   = cut(emi, breaks = breaks, include.lowest = TRUE, right = TRUE, labels = labels),
-        purchased = decision == 1
-      ) %>%
-      dplyr::group_by(emi_bin) %>%
-      dplyr::summarise(
-        Observations   = dplyr::n(),
-        Purchase_Rate  = mean(purchased, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      dplyr::mutate(
-        emi_bin = as.character(emi_bin),
-        Purchase_Rate = scales::percent(Purchase_Rate, accuracy = 1)
-      ) %>%
-      dplyr::arrange(factor(emi_bin, levels = labels))
-    
-    total_obs <- sum(agg$Observations, na.rm = TRUE)
-    agg <- dplyr::bind_rows(
-      agg,
-      tibble::tibble(emi_bin = "TOTAL (valid EMI & decision)", Observations = total_obs, Purchase_Rate = "")
-    )
-    
-    agg %>% dplyr::rename(`EMI bin` = emi_bin)
-  }, striped = TRUE, spacing = "s")
 })

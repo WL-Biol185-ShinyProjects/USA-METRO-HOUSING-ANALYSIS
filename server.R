@@ -356,6 +356,18 @@ shinyServer(function(input, output, session) {
       dplyr::filter(is.finite(constructed_year), is.finite(avg_price)) %>%
       dplyr::arrange(constructed_year)
     
+    # If there are no rows after aggregation, return an empty plot
+    if (nrow(agg) == 0) {
+      p <- plotly::plot_ly() %>% layout(
+        annotations = list(
+          x = 0.5, y = 0.5, text = "No data available under current filters",
+          showarrow = FALSE, xref = "paper", yref = "paper"
+        )
+      )
+      p <- plotly::event_register(p, 'plotly_selected')  # register brush event even on empty plots
+      return(p)
+    }
+    
     sel <- selected_age_range()  # NULL or c(x0, x1)
     
     p <- plotly::plot_ly(

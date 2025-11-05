@@ -182,8 +182,8 @@ dashboardPage(
               column(
                 width = 4,
                 selectInput(
-                  "fin_xvar", "X-axis for scatter",
-                  choices = c("salary", "loan", "emi"),
+                  "fin_xvar", "X-axis for Salary / Loan / EMI vs Price Scatter Plot",
+                  choices = c("Salary" = "salary", "Loan" = "loan", "EMI" = "emi"),
                   selected = "salary"
                 )
               )

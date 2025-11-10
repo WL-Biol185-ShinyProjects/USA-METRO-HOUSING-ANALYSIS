@@ -2,6 +2,7 @@
 # ui.R
 library(shiny)
 library(shinydashboard)
+library(DT)
 source("global.R")
 
 dashboardPage(
@@ -11,7 +12,9 @@ dashboardPage(
       id = "tabs",
       menuItem("Overview",                tabName = "overview",  icon = icon("home")),
       menuItem("Descriptive Insights",    tabName = "insights",  icon = icon("chart-line")),
-      menuItem("Financial Analysis",      tabName = "financial", icon = icon("dollar-sign"))
+      menuItem("Financial Analysis",      tabName = "financial", icon = icon("dollar-sign")),
+      menuItem("Modeling", tabName = "modeling", icon = icon("brain")), 
+      menuItem("Data Table", tabName = "datatable", icon = icon("table"))
     )
   ),
   dashboardBody(
@@ -226,8 +229,111 @@ dashboardPage(
             br(),
           )
         )
+      ),
+      # ==================================================================
+      # MODELING
+      # ==================================================================
+      tabItem(
+        tabName = "modeling",
+        
+        fluidRow(
+          box(
+            title = "City & Size Recommendation", width = 4,
+            status = "primary", solidHeader = TRUE,
+            
+            selectInput("mdl_property", "Property type",
+                        choices = c("All", sort(unique(house$property_type))), selected = "All"),
+            checkboxInput("mdl_garage", "Must have: Garage", value = FALSE),
+            checkboxInput("mdl_garden", "Must have: Garden", value = FALSE),
+            selectInput("mdl_furnish", "Furnishing status",
+                        choices = c("Any","Unfurnished","Semi-Furnished","Fully-Furnished"),
+                        selected = "Any"),
+            sliderInput("mdl_price_range", "Budget (display currency)",
+                        min = 0, max = max(house$price, na.rm = TRUE),
+                        value = c(0, max(house$price, na.rm = TRUE))),
+            numericInput("mdl_salary", "Customer salary (optional)", value = NA, min = 0),
+            
+            actionButton("btn_recommend", "Get recommendations", icon = icon("magic"))
+          ),
+          
+          box(
+            title = "Recommendations", width = 8,
+            status = "primary", solidHeader = TRUE,
+            fluidRow(
+              valueBoxOutput("rec_sqft", width = 6),
+              valueBoxOutput("rec_country", width = 6)
+            ),
+            br(),
+            h4("Top cities in recommended country"),
+            plotlyOutput("mdl_city_bar", height = 380)
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Price Prediction for a Property", width = 4,
+            status = "success", solidHeader = TRUE,
+            
+            # Inputs for the hypothetical listing
+            numericInput("pred_sqft", "Property size (sqft)", value = 1200, min = 100, step = 50),
+            selectInput("pred_country", "Country", choices = sort(unique(house$country))),
+            selectInput("pred_city", "City", choices = sort(unique(house$city))),  # updated by server after country changes
+            selectInput("pred_property", "Property type", choices = sort(unique(house$property_type))),
+            numericInput("pred_year", "Constructed year", value = 2005, min = 1900, max = 2025, step = 1),
+            checkboxInput("pred_garage", "Garage", value = FALSE),
+            checkboxInput("pred_garden", "Garden", value = FALSE),
+            selectInput("pred_furnish", "Furnishing status", choices = c("Unfurnished","Semi-Furnished","Fully-Furnished"), selected = "Unfurnished"),
+            
+            actionButton("btn_predict", "Predict price", icon = icon("chart-line"))
+          ),
+          
+          box(
+            title = "Predicted price (display currency)", width = 8,
+            status = "success", solidHeader = TRUE,
+            h4(textOutput("predicted_price_text")),
+            plotlyOutput("predicted_price_ci", height = 260)
+          )
+        )
+      ),
+      # ==================================================================
+      # DATA TABLE
+      # ==================================================================
+      tabItem(
+        tabName = "datatable",
+        fluidRow(
+          box(
+            title = "Filters", width = 12, status = "primary", solidHeader = TRUE,
+            fluidRow(
+              column(
+                width = 3,
+                selectInput("dt_country", "Country",
+                            choices = c("All", sort(unique(house$country))),
+                            selected = "All")
+              ),
+              column(
+                width = 3,
+                uiOutput("dt_city_ui")  # appears only after a country is chosen
+              ),
+              column(
+                width = 4,
+                uiOutput("dt_value_ui") # price range slider (display currency)
+              ),
+              column(
+                width = 2,
+                selectInput("dt_decision", "Purchased?",
+                            choices = c("All", "Purchased", "Not purchased"),
+                            selected = "All")
+              )
+            )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "All Records", width = 12, status = "info", solidHeader = TRUE,
+            DT::DTOutput("dt_table")
+          )
+        )
       )
-      
     )
   )
 )

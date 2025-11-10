@@ -740,4 +740,399 @@ shinyServer(function(input, output, session) {
         legend = list(orientation = "h", y = -0.15)
       )
   })
+  # ===========================
+  # MODELING — helpers
+  # ===========================
+  
+  # Keep city choices synced to chosen country in the predictor UI
+  observeEvent(input$pred_country, {
+    opts <- house %>%
+      dplyr::filter(country == input$pred_country) %>%
+      dplyr::pull(city) %>%
+      unique() %>% sort()
+    updateSelectInput(session, "pred_city", choices = opts, selected = dplyr::first(opts))
+  }, ignoreInit = TRUE)
+  
+  # Build a modeling frame aligned to the current currency display
+  df_modeling <- reactive({
+    # Use the same currency-normalized data as elsewhere
+    df <- df_price()
+    df %>%
+      dplyr::mutate(
+        # Basic sanitization of booleans and factors used below
+        garage = as.integer(garage %in% 1),
+        garden = as.integer(garden %in% 1),
+        furnishing_status = dplyr::case_when(
+          is.na(furnishing_status) ~ "Unknown",
+          TRUE ~ as.character(furnishing_status)
+        )
+      )
+  })
+  
+  # ===========================
+  # Recommendation
+  # ===========================
+  # ----- Modeling: recommendation engine (suggestive) -----
+  recommend_suggestions <- eventReactive(input$btn_recommend, {
+    df <- df_modeling()
+    if (nrow(df) == 0) return(NULL)
+    
+    # Base filter from user prefs (suggestive, not overconstrained)
+    dfx <- df
+    if (!is.null(input$mdl_property) && input$mdl_property != "All") {
+      dfx <- dfx %>% dplyr::filter(property_type == input$mdl_property)
+    }
+    if (isTRUE(input$mdl_garage)) dfx <- dfx %>% dplyr::filter(garage == 1)
+    if (isTRUE(input$mdl_garden)) dfx <- dfx %>% dplyr::filter(garden == 1)
+    if (!is.null(input$mdl_furnish) && input$mdl_furnish != "Any") {
+      dfx <- dfx %>% dplyr::filter(furnishing_status == input$mdl_furnish)
+    }
+    
+    # Budget window in display currency
+    pr <- input$mdl_price_range
+    if (length(pr) == 2 && all(is.finite(pr))) {
+      dfx <- dfx %>% dplyr::filter(price_display >= pr[1], price_display <= pr[2])
+    }
+    
+    # Optional salary band [0.6x, 1.4x] if a salary column exists
+    if (is.finite(input$mdl_salary)) {
+      sal_col <- intersect(c("customer_salary","salary","income"), names(dfx))
+      if (length(sal_col) == 1) {
+        dfx <- dfx %>%
+          dplyr::mutate(sal_num = suppressWarnings(as.numeric(.data[[sal_col]]))) %>%
+          dplyr::filter(is.finite(sal_num)) %>%
+          dplyr::filter(sal_num >= 0.6 * input$mdl_salary,
+                        sal_num <= 1.4 * input$mdl_salary)
+      }
+    }
+    
+    if (nrow(dfx) == 0) return(list(ok = FALSE))
+    
+    # 1) Recommend SQFT from successful purchases within the filtered set
+    dfp <- dfx %>% dplyr::filter(is.finite(property_size_sqft))
+    dfp_buy <- dfp %>% dplyr::filter(!is.na(decision) & decision == 1)
+    base_sqft <- if (nrow(dfp_buy) >= 50) dfp_buy else dfp
+    if (nrow(base_sqft) == 0) {
+      rec_sqft <- NA_real_; lo_sqft <- NA_real_; hi_sqft <- NA_real_
+    } else {
+      qs <- stats::quantile(base_sqft$property_size_sqft, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+      lo_sqft <- as.numeric(qs[1]); rec_sqft <- as.numeric(qs[2]); hi_sqft <- as.numeric(qs[3])
+    }
+    
+    # 2) Recommend COUNTRY by smoothed purchase rate
+    global_rate <- df %>%
+      dplyr::filter(!is.na(decision)) %>%
+      dplyr::summarise(r = mean(decision == 1), .groups = "drop") %>% dplyr::pull(r)
+    if (!is.finite(global_rate)) global_rate <- 0.5
+    alpha <- 5
+    
+    agg_country <- dfx %>%
+      dplyr::filter(!is.na(country), !is.na(decision)) %>%
+      dplyr::group_by(country) %>%
+      dplyr::summarise(n = dplyr::n(),
+                       buys = sum(decision == 1),
+                       .groups = "drop") %>%
+      dplyr::mutate(rate = (buys + alpha * global_rate) / (n + alpha)) %>%
+      dplyr::arrange(dplyr::desc(rate), dplyr::desc(n))
+    
+    rec_country <- if (nrow(agg_country) == 0) NA_character_ else agg_country$country[1]
+    
+    # 3) Top cities within the recommended country
+    agg_city <- dfx %>%
+      { if (is.na(rec_country)) . else dplyr::filter(., country == rec_country) } %>%
+      dplyr::filter(!is.na(city), !is.na(decision)) %>%
+      dplyr::group_by(country, city) %>%
+      dplyr::summarise(n = dplyr::n(), buys = sum(decision == 1), .groups = "drop") %>%
+      dplyr::mutate(rate = (buys + alpha * global_rate) / (n + alpha)) %>%
+      dplyr::arrange(dplyr::desc(rate), dplyr::desc(n)) %>%
+      dplyr::slice(1:12)
+    
+    list(
+      ok = TRUE,
+      rec_sqft = rec_sqft, lo_sqft = lo_sqft, hi_sqft = hi_sqft,
+      rec_country = rec_country,
+      agg_city = agg_city
+    )
+  })
+  
+  # Suggested SQFT valueBox
+  output$rec_sqft <- renderValueBox({
+    res <- recommend_suggestions()
+    if (is.null(res) || !isTRUE(res$ok) || !is.finite(res$rec_sqft)) {
+      return(valueBox("—", "Recommended size (sqft)", icon = icon("ruler-combined"), color = "light-blue"))
+    }
+    label <- if (is.finite(res$lo_sqft) && is.finite(res$hi_sqft)) {
+      paste0(round(res$rec_sqft), " (IQR ", round(res$lo_sqft), "–", round(res$hi_sqft), ")")
+    } else as.character(round(res$rec_sqft))
+    valueBox(label, "Recommended size (sqft)", icon = icon("ruler-combined"), color = "light-blue")
+  })
+  
+  # Suggested COUNTRY valueBox
+  output$rec_country <- renderValueBox({
+    res <- recommend_suggestions()
+    if (is.null(res) || !isTRUE(res$ok) || is.na(res$rec_country)) {
+      return(valueBox("—", "Recommended country", icon = icon("globe"), color = "teal"))
+    }
+    valueBox(res$rec_country, "Recommended country", icon = icon("globe"), color = "teal")
+  })
+  
+  # City bar chart in recommended country
+  output$mdl_city_bar <- renderPlotly({
+    res <- recommend_suggestions()
+    if (is.null(res) || !isTRUE(res$ok) || nrow(res$agg_city) == 0) {
+      return(plotly::plot_ly() %>% layout(
+        annotations = list(x = 0.5, y = 0.5, text = "No matching cities", showarrow = FALSE,
+                           xref = "paper", yref = "paper")
+      ))
+    }
+    plotly::plot_ly(
+      data = res$agg_city,
+      x = ~paste0(city, " (", country, ")"),
+      y = ~rate, type = "bar",
+      text = ~paste0(
+        city, " — ", country,
+        "<br>Purchase rate: ", scales::percent(rate, 1),
+        "<br>Obs: ", n
+      ),
+      hoverinfo = "text"
+    ) %>%
+      layout(
+        xaxis = list(title = "City"),
+        yaxis = list(title = "Estimated purchase rate", tickformat = ".0%")
+      )
+  })
+  
+  # ===========================
+  # Price Prediction (log-linear baseline with CIs)
+  # ===========================
+  predict_price <- eventReactive(input$btn_predict, {
+    df <- df_modeling()
+    
+    # --- training frame ---
+    train <- df %>%
+      dplyr::mutate(
+        y         = log(pmax(price_display, 1)),
+        ln_sqft   = log(pmax(property_size_sqft, 1)),
+        garage    = factor(garage, levels = c(0, 1)),
+        garden    = factor(garden, levels = c(0, 1)),
+        furnishing_status = factor(
+          dplyr::coalesce(as.character(furnishing_status), "Unknown")
+        ),
+        country       = factor(country),
+        city          = factor(city),
+        property_type = factor(property_type)
+      ) %>%
+      dplyr::filter(
+        is.finite(y), is.finite(ln_sqft),
+        !is.na(country), !is.na(city), !is.na(property_type), !is.na(constructed_year)
+      ) %>%
+      droplevels()
+    
+    if (nrow(train) < 50) return(NULL)
+    
+    fmla <- y ~ ln_sqft + country + city + property_type + constructed_year +
+      garage + garden + furnishing_status
+    fit <- stats::lm(fmla, data = train)
+    
+    # --- build new-data row from inputs ---
+    nd <- tibble::tibble(
+      property_size_sqft = input$pred_sqft,
+      ln_sqft            = log(pmax(input$pred_sqft, 1)),
+      country            = as.character(input$pred_country),
+      city               = as.character(input$pred_city),
+      property_type      = as.character(input$pred_property),
+      constructed_year   = input$pred_year,
+      garage             = as.integer(isTRUE(input$pred_garage)),
+      garden             = as.integer(isTRUE(input$pred_garden)),
+      furnishing_status  = as.character(input$pred_furnish)
+    )
+    
+    # helper: align a character column in nd to training factor levels safely
+    align_factor <- function(nd, train, var) {
+      lv <- levels(train[[var]])
+      if (is.null(lv) || length(lv) == 0) {
+        # fall back to unique non-NA values observed in training
+        lv <- sort(unique(as.character(train[[var]])))
+      }
+      if (length(lv) == 0) {
+        # no valid levels at all; return NA factor with empty levels (model will error later)
+        nd[[var]] <- factor(NA_character_, levels = character(0))
+        return(nd)
+      }
+      val <- as.character(nd[[var]][1])
+      if (!isTRUE(val %in% lv)) val <- lv[1]
+      nd[[var]] <- factor(val, levels = lv)
+      nd
+    }
+    
+    nd <- align_factor(nd, train, "country")
+    nd <- align_factor(nd, train, "city")
+    nd <- align_factor(nd, train, "property_type")
+    nd <- align_factor(nd, train, "furnishing_status")
+    nd$garage <- factor(nd$garage, levels = c(0, 1))
+    nd$garden <- factor(nd$garden, levels = c(0, 1))
+    
+    # guard: if any aligned factor ended up with 0 levels, bail gracefully
+    bad <- any(vapply(c("country","city","property_type","furnishing_status"),
+                      function(v) length(levels(nd[[v]])) == 0, logical(1)))
+    if (bad) return(NULL)
+    
+    # --- predict on log scale, invert, and return ---
+    pr <- stats::predict(fit, newdata = nd, interval = "prediction", level = 0.80, se.fit = TRUE)
+    out <- tibble::tibble(
+      pred_lo = exp(pr$fit[,"lwr"]),
+      pred    = exp(pr$fit[,"fit"]),
+      pred_hi = exp(pr$fit[,"upr"])
+    )
+    
+    list(pred_df = out, model = fit)
+  })
+  
+  output$predicted_price_text <- renderText({
+    res <- predict_price()
+    if (is.null(res)) return("Not enough data to train a model under current settings.")
+    p  <- res$pred_df$pred
+    lo <- res$pred_df$pred_lo
+    hi <- res$pred_df$pred_hi
+    paste0("Point estimate: ", fmt_compact_money(p),
+           "   |   80% prediction interval: ",
+           fmt_compact_money(lo), " — ", fmt_compact_money(hi))
+  })
+  
+  output$predicted_price_ci <- renderPlotly({
+    res <- predict_price()
+    if (is.null(res)) return(plotly::plot_ly())
+    
+    p  <- res$pred_df$pred
+    lo <- res$pred_df$pred_lo
+    hi <- res$pred_df$pred_hi
+    
+    plotly::plot_ly() %>%
+      add_trace(
+        x = c(0, 1), y = c(p, p), type = "scatter", mode = "lines",
+        name = "Predicted", hoverinfo = "skip"
+      ) %>%
+      add_trace(
+        x = c(0, 1, 1, 0, 0),
+        y = c(lo, lo, hi, hi, lo),
+        type = "scatter", mode = "lines", fill = "toself",
+        name = "80% PI", hoverinfo = "skip", opacity = 0.3
+      ) %>%
+      layout(
+        showlegend = FALSE,
+        xaxis = list(showticklabels = FALSE, title = ""),
+        yaxis = c(list(title = ""), make_yaxis_compact(c(lo, p, hi), digits = 1))
+      )
+  })
+  # ---------------------------
+  # Data Table: dynamic filter UIs
+  # ---------------------------
+  
+  # City input appears only when a specific country is selected
+  output$dt_city_ui <- renderUI({
+    req(input$dt_country)
+    if (identical(input$dt_country, "All")) return(NULL)
+    
+    dfc <- df_price() %>% dplyr::filter(country == input$dt_country)
+    choices <- c("All", sort(unique(dfc$city)))
+    selectInput("dt_city", "City", choices = choices, selected = "All")
+  })
+  
+  # Price range slider (based on current display currency across all data)
+  output$dt_value_ui <- renderUI({
+    df <- df_price()
+    rng <- range(df$price_display, na.rm = TRUE)
+    if (!all(is.finite(rng))) rng <- c(0, 1)
+    
+    sliderInput(
+      "dt_value", "House value range (display currency)",
+      min = floor(rng[1]), max = ceiling(rng[2]),
+      value = rng, step = max(1, round((rng[2] - rng[1]) / 200))
+    )
+  })
+  
+  # ---------------------------
+  # Data Table: filtered data
+  # ---------------------------
+  df_table <- reactive({
+    df <- df_price()  # respects currency toggle used elsewhere
+    if (nrow(df) == 0) return(df)
+    
+    # Apply filters
+    if (!identical(input$dt_country, "All")) {
+      df <- df %>% dplyr::filter(country == input$dt_country)
+    }
+    if (!is.null(input$dt_city) && !identical(input$dt_city, "All")) {
+      df <- df %>% dplyr::filter(city == input$dt_city)
+    }
+    if (!is.null(input$dt_value) && length(input$dt_value) == 2 && all(is.finite(input$dt_value))) {
+      df <- df %>% dplyr::filter(price_display >= input$dt_value[1],
+                                 price_display <= input$dt_value[2])
+    }
+    if (!is.null(input$dt_decision) && !identical(input$dt_decision, "All") && "decision" %in% names(df)) {
+      if (identical(input$dt_decision, "Purchased")) {
+        df <- df %>% dplyr::filter(decision == 1)
+      } else if (identical(input$dt_decision, "Not purchased")) {
+        df <- df %>% dplyr::filter(decision == 0)
+      }
+    }
+    
+    df
+  })
+  
+  # ---------------------------
+  # Data Table: render
+  # ---------------------------
+  output$dt_table <- DT::renderDT({
+    df <- df_table()
+    if (nrow(df) == 0) {
+      return(DT::datatable(
+        data.frame(Message = "No rows under current filters"),
+        rownames = FALSE, options = list(dom = "t")
+      ))
+    }
+    
+    # Safe Yes/No mapping
+    yes_no <- function(x) dplyr::case_when(
+      is.na(x)          ~ "Unknown",
+      x %in% c(1, "1")  ~ "Yes",
+      x %in% c(0, "0")  ~ "No",
+      TRUE              ~ as.character(x)
+    )
+    
+    # Build display frame in desired order and names
+    display <- df %>%
+      dplyr::mutate(
+        `Garage Access` = yes_no(garage),
+        `Garden Access` = yes_no(garden),
+        Price           = fmt_compact_money(price_display)  # uses display currency
+      ) %>%
+      dplyr::transmute(
+        `Property #`             = property_id,
+        Country                  = country,
+        City                     = city,
+        `Property Type`          = property_type,
+        `Furnishing Status`      = furnishing_status,
+        `Property Size (sqft)`   = property_size_sqft,
+        Price,  # from mutated column above
+        `Year of Construction`   = constructed_year,
+        `# of Previous Owners`   = previous_owners,
+        `# of Rooms`             = rooms,
+        `# of Bathrooms`         = bathrooms,
+        `Garage Access`,
+        `Garden Access`
+      )
+    
+    DT::datatable(
+      display,
+      rownames = FALSE,
+      filter   = "top",
+      options  = list(
+        pageLength = 25,
+        lengthMenu = c(10, 25, 50, 100),
+        scrollX = TRUE,
+        order = list()
+      )
+    )
+  })
 })

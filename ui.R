@@ -3,7 +3,6 @@
 library(shiny)
 library(shinydashboard)
 library(DT)
-source("global.R")
 
 dashboardPage(
   dashboardHeader(title = "Global Major Cities Housing Analysis"),

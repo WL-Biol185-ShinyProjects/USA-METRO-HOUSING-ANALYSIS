@@ -8,3 +8,5 @@ Made another change
 This file has changed now!
 
 This is an edit 
+
+References, acknowledgments to claude, gpt, citations, etc.

@@ -1,8 +1,5 @@
 
-# server.R
-source("global.R")
-
-shinyServer(function(input, output, session) {
+function(input, output, session) {
   # ====================================================================
   # OVERVIEW TAB
   # ====================================================================
@@ -1135,4 +1132,4 @@ shinyServer(function(input, output, session) {
       )
     )
   })
-})
+}

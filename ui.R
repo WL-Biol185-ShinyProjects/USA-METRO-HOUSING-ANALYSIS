@@ -23,7 +23,7 @@ ui <- dashboardPage(
   # Sidebar
   # -------------------------------------------------------------------------
   dashboardSidebar(
-    width = 280,
+    width = 320,
     sidebarMenu(
       id = "tabs",
       
